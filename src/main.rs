@@ -107,6 +107,7 @@ impl Blockchain {
 
     fn save(&mut self, block: &Block) -> Result<()> {
         if self.curr_hash == block.prev_hash {
+            println!("begin process block");
             let hash = &block.hash.as_bytes();
             let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
             let mut batch = WriteBatch::default();
@@ -145,7 +146,7 @@ impl Drop for Blockchain {
 
 fn main() {
     let mut chain = Blockchain::new();
-    const N: usize = 500000;
+    const N: usize = 100000;
     let issuer = "a".to_string();
     let accounts: Vec<String> = (0..N).map(|i| i.to_string()).collect();
     let txes: Vec<Transaction> = accounts
