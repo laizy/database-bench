@@ -2,13 +2,49 @@
 extern crate serde_derive;
 extern crate bincode;
 extern crate rand;
-extern crate rocksdb;
+extern crate leveldb;
+extern crate db_key;
 extern crate sha2;
+#[macro_use]
+extern crate log;
 
-use rocksdb::WriteBatch;
-use rocksdb::DB;
+use leveldb::batch::Batch;
+use leveldb::batch::Writebatch as WriteBatch;
+use leveldb::kv::KV;
+use db_key::Key;
+use leveldb::options::{Options,WriteOptions,ReadOptions};
+use leveldb::database::Database as DB;
+
 use sha2::{Digest, Sha256};
 use std::{mem, time};
+use std::collections::HashMap;
+use std::path::Path;
+
+struct DBKey(Vec<u8>);
+impl Key for DBKey {
+    fn from_u8(key: &[u8]) -> Self {
+        DBKey(key.into())
+    }
+
+    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
+        f(&self.0)
+    }
+}
+
+impl DBKey {
+    fn from_u8(key: &[u8]) -> Self {
+        DBKey(key.into())
+    }
+    fn from_str(key: &str) -> Self {
+        DBKey(key.as_bytes().into())
+    }
+}
+
+impl<'a> Into<DBKey> for &'a [u8] {
+    fn into(self) -> DBKey {
+        DBKey(self.into())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Transaction {
@@ -75,20 +111,23 @@ impl Block {
 }
 
 struct Blockchain {
-    db: DB,
+    db: DB<DBKey>,
     curr_hash: String,
 }
 
-type Result<T> = std::result::Result<T, rocksdb::Error>;
+type Result<T> = std::result::Result<T, leveldb::database::error::Error>;
 
 impl Blockchain {
     fn new() -> Self {
-        let db = DB::open_default("./data").unwrap();
+        let mut options = Options::new();
+        options.create_if_missing = true;
+        let mut db:DB<DBKey> = DB::open(Path::new("./data"), options).unwrap();
+
         let mut chain = Blockchain {
             db,
             curr_hash: "".to_string(),
         };
-        let hash = match chain.db.get(b"curr_hash") {
+        let hash = match chain.db.get(ReadOptions::new(), DBKey::from_str("curr_hash")) {
             Ok(Some(val)) => String::from_utf8(val.to_vec()).unwrap(),
             Ok(None) => {
                 let block = Block::new(vec![Transaction::coinbase()], "");
@@ -110,23 +149,30 @@ impl Blockchain {
             println!("begin process block");
             let hash = &block.hash.as_bytes();
             let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
-            let mut batch = WriteBatch::default();
-            batch.put(hash, &encoded)?;
-            batch.put(b"curr_hash", hash)?;
+            let mut batch = WriteBatch::new();
+            batch.put(DBKey::from_u8(hash), &encoded);
+            batch.put(DBKey::from_str("curr_hash"), hash);
+            if block.prev_hash == "" {
+                let balance = bincode::serialize(&100000000000u64).unwrap();
+                batch.put(DBKey::from_str("a"), &balance);
+            }
             for tx in &block.transactions {
+                // acturally it should first check the batch to get the balance
                 let mut from = self.balance(&tx.from)?;
                 if from >= tx.value {
                     let mut to = self.balance(&tx.to)?;
                     from -= tx.value;
                     to += tx.value;
-                    batch.put(tx.from.as_bytes(), &bincode::serialize(&from).unwrap())?;
-                    batch.put(tx.to.as_bytes(), &bincode::serialize(&to).unwrap())?;
+                    trace!("batch put {}: {}", tx.from, from);
+                    trace!("batch put {}: {}", tx.to, to);
+                    batch.put(tx.from.as_bytes().into(), &bincode::serialize(&from).unwrap());
+                    batch.put(tx.to.as_bytes().into(), &bincode::serialize(&to).unwrap());
                 }
             }
 
-            let mut write_options = rocksdb::WriteOptions::default();
-            write_options.set_sync(true);
-            self.db.write_opt(batch, &write_options)?;
+            let mut write_options = WriteOptions::new();
+            write_options.sync = true;
+            self.db.write(write_options, &batch)?;
             self.curr_hash = block.hash.clone();
             return Ok(());
         }
@@ -134,7 +180,8 @@ impl Blockchain {
     }
 
     fn balance(&self, account: &str) -> Result<u64> {
-        let bf = self.db.get(account.as_bytes())?;
+        let read_option = ReadOptions::new();
+        let bf = self.db.get(read_option, DBKey::from_str(account))?;
         bf.map(|v| Ok(bincode::deserialize(&v).unwrap()))
             .unwrap_or(Ok(0u64))
     }
@@ -148,18 +195,20 @@ fn main() {
     let mut chain = Blockchain::new();
     const N: usize = 100000;
     let issuer = "a".to_string();
-    let accounts: Vec<String> = (0..N).map(|i| i.to_string()).collect();
+    let accounts: Vec<String> = (0..N).map(|i| "account".to_string() + &i.to_string()).collect();
     let txes: Vec<Transaction> = accounts
         .iter()
-        .map(|addr| Transaction::new(issuer.clone(), addr.to_string(), 100))
+        .map(|addr| Transaction::new(issuer.clone(), addr.to_string(), 1000))
         .collect();
+
+    let mut balances: HashMap<String, u64> = accounts.iter().map(|addr| (addr.to_string(), 100)).collect();
 
     let block = Block::new(txes, chain.curr_hash());
     println!("begin save");
     chain.save(&block).unwrap();
     println!("end save");
 
-    for _i in 0..10 {
+    for _i in 0..1000 {
         let txes: Vec<_> = (0..N)
             .map(|i| {
                 let from = &accounts[rand::random::<usize>() % N];
@@ -167,10 +216,22 @@ fn main() {
                 Transaction::new(from.to_string(), to.to_string(), 1)
             })
             .collect();
+        for tx in &txes {
+            *balances.entry(tx.from.to_string()).or_insert(0) -= tx.value;
+            *balances.entry(tx.to.to_string()).or_insert(0) += tx.value;
+        }
+
         let block = Block::new(txes, chain.curr_hash());
         let now = time::Instant::now();
         chain.save(&block).unwrap();
         let new_now = time::Instant::now();
         println!("execution time:{:?}", new_now.duration_since(now));
     }
+
+    let expected = balances.iter().map(|(k, v)| {
+        println!("expected {}, got {}", *v, chain.balance(k).unwrap());
+        chain.balance(k).unwrap() == *v
+    }).all(|v| v);
+
+    println!("expected: {}", expected);
 }

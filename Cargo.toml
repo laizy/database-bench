@@ -3,13 +3,24 @@ name = "rocksdb-bench"
 version = "0.1.0"
 authors = ["laizy <aochyi@126.com>"]
 
+[[bin]]
+name = "leveldb"
+path = "src/leveldb.rs"
+
+[[bin]]
+name = "rocksdb"
+path = "src/rocksdb.rs"
+
 [dependencies]
 rocksdb = "0.10.0"
+leveldb = "*"
 serde = "1.0"
 serde_derive = "1.0"
 bincode = "1.0"
 sha2 = "*"
 rand = "0.5"
+log = "0.4"
+db-key = "0.0.5"
 
 [profile.release]
 debug = true
