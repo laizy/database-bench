@@ -1,24 +1,27 @@
 #[macro_use]
 extern crate serde_derive;
 extern crate bincode;
-extern crate rand;
-extern crate leveldb;
 extern crate db_key;
+extern crate leveldb;
+extern crate rand;
 extern crate sha2;
 #[macro_use]
 extern crate log;
+extern crate leveldb_sys;
 
+use db_key::Key;
 use leveldb::batch::Batch;
 use leveldb::batch::Writebatch as WriteBatch;
-use leveldb::kv::KV;
-use db_key::Key;
-use leveldb::options::{Options,WriteOptions,ReadOptions};
 use leveldb::database::Database as DB;
+use leveldb::kv::KV;
+use leveldb::options::{Options, ReadOptions, WriteOptions};
+use leveldb_sys::Compression;
 
 use sha2::{Digest, Sha256};
-use std::{mem, time};
 use std::collections::HashMap;
+use std::iter;
 use std::path::Path;
+use std::{mem, time};
 
 struct DBKey(Vec<u8>);
 impl Key for DBKey {
@@ -121,13 +124,22 @@ impl Blockchain {
     fn new() -> Self {
         let mut options = Options::new();
         options.create_if_missing = true;
-        let mut db:DB<DBKey> = DB::open(Path::new("./data"), options).unwrap();
+        options.compression = Compression::Snappy;
+        options.cache = Some(leveldb::database::cache::Cache::new(8 * 1024 * 1024));
+        options.block_restart_interval = Some(16);
+        options.block_size = Some(4 * 1024);
+        options.write_buffer_size = Some(4 * 1024);
+
+        let mut db: DB<DBKey> = DB::open(Path::new("./data"), options).unwrap();
 
         let mut chain = Blockchain {
             db,
             curr_hash: "".to_string(),
         };
-        let hash = match chain.db.get(ReadOptions::new(), DBKey::from_str("curr_hash")) {
+        let hash = match chain
+            .db
+            .get(ReadOptions::new(), DBKey::from_str("curr_hash"))
+        {
             Ok(Some(val)) => String::from_utf8(val.to_vec()).unwrap(),
             Ok(None) => {
                 let block = Block::new(vec![Transaction::coinbase()], "");
@@ -147,11 +159,12 @@ impl Blockchain {
     fn save(&mut self, block: &Block) -> Result<()> {
         if self.curr_hash == block.prev_hash {
             println!("begin process block");
-            let hash = &block.hash.as_bytes();
-            let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
             let mut batch = WriteBatch::new();
+            /*let hash = &block.hash.as_bytes();
+            let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
             batch.put(DBKey::from_u8(hash), &encoded);
             batch.put(DBKey::from_str("curr_hash"), hash);
+            */
             if block.prev_hash == "" {
                 let balance = bincode::serialize(&100000000000u64).unwrap();
                 batch.put(DBKey::from_str("a"), &balance);
@@ -165,7 +178,10 @@ impl Blockchain {
                     to += tx.value;
                     trace!("batch put {}: {}", tx.from, from);
                     trace!("batch put {}: {}", tx.to, to);
-                    batch.put(tx.from.as_bytes().into(), &bincode::serialize(&from).unwrap());
+                    batch.put(
+                        tx.from.as_bytes().into(),
+                        &bincode::serialize(&from).unwrap(),
+                    );
                     batch.put(tx.to.as_bytes().into(), &bincode::serialize(&to).unwrap());
                 }
             }
@@ -194,21 +210,29 @@ impl Drop for Blockchain {
 fn main() {
     let mut chain = Blockchain::new();
     const N: usize = 100000;
+    const len_prefix: usize = 60;
     let issuer = "a".to_string();
-    let accounts: Vec<String> = (0..N).map(|i| "account".to_string() + &i.to_string()).collect();
+    let prefix: String = iter::repeat('x').take(len_prefix).collect();
+
+    let accounts: Vec<String> = (0..N)
+        .map(|i| prefix.to_string() + &i.to_string())
+        .collect();
     let txes: Vec<Transaction> = accounts
         .iter()
         .map(|addr| Transaction::new(issuer.clone(), addr.to_string(), 1000))
         .collect();
 
-    let mut balances: HashMap<String, u64> = accounts.iter().map(|addr| (addr.to_string(), 100)).collect();
+    let mut balances: HashMap<String, u64> = accounts
+        .iter()
+        .map(|addr| (addr.to_string(), 100))
+        .collect();
 
     let block = Block::new(txes, chain.curr_hash());
     println!("begin save");
     chain.save(&block).unwrap();
     println!("end save");
 
-    for _i in 0..1000 {
+    for _i in 0..200 {
         let txes: Vec<_> = (0..N)
             .map(|i| {
                 let from = &accounts[rand::random::<usize>() % N];
@@ -228,10 +252,13 @@ fn main() {
         println!("execution time:{:?}", new_now.duration_since(now));
     }
 
-    let expected = balances.iter().map(|(k, v)| {
-        println!("expected {}, got {}", *v, chain.balance(k).unwrap());
-        chain.balance(k).unwrap() == *v
-    }).all(|v| v);
+    let expected = balances
+        .iter()
+        .map(|(k, v)| {
+            println!("expected {}, got {}", *v, chain.balance(k).unwrap());
+            chain.balance(k).unwrap() == *v
+        })
+        .all(|v| v);
 
     println!("expected: {}", expected);
 }

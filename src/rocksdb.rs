@@ -10,8 +10,9 @@ extern crate log;
 use rocksdb::WriteBatch;
 use rocksdb::DB;
 use sha2::{Digest, Sha256};
-use std::{mem, time};
 use std::collections::HashMap;
+use std::iter;
+use std::{mem, time};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Transaction {
@@ -111,11 +112,11 @@ impl Blockchain {
     fn save(&mut self, block: &Block) -> Result<()> {
         if self.curr_hash == block.prev_hash {
             println!("begin process block");
-            let hash = &block.hash.as_bytes();
-            let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
             let mut batch = WriteBatch::default();
-            batch.put(hash, &encoded)?;
-            batch.put(b"curr_hash", hash)?;
+//            let hash = &block.hash.as_bytes();
+//            let encoded: Vec<u8> = bincode::serialize(&block).unwrap();
+//            batch.put(hash, &encoded)?;
+//            batch.put(b"curr_hash", hash)?;
             if block.prev_hash == "" {
                 let balance = bincode::serialize(&100000000000u64).unwrap();
                 batch.put(b"a", &balance);
@@ -156,22 +157,30 @@ impl Drop for Blockchain {
 
 fn main() {
     let mut chain = Blockchain::new();
-    const N: usize = 50;
+    const N: usize = 200000;
+    const len_prefix: usize = 60;
+
     let issuer = "a".to_string();
-    let accounts: Vec<String> = (0..N).map(|i| "account".to_string() + &i.to_string()).collect();
+    let prefix: String = iter::repeat('x').take(len_prefix).collect();
+    let accounts: Vec<String> = (0..N)
+        .map(|i| prefix.to_string() + &i.to_string())
+        .collect();
     let txes: Vec<Transaction> = accounts
         .iter()
         .map(|addr| Transaction::new(issuer.clone(), addr.to_string(), 100))
         .collect();
 
-    let mut balances: HashMap<String, u64> = accounts.iter().map(|addr| (addr.to_string(), 100)).collect();
+    let mut balances: HashMap<String, u64> = accounts
+        .iter()
+        .map(|addr| (addr.to_string(), 100))
+        .collect();
 
     let block = Block::new(txes, chain.curr_hash());
     println!("begin save");
     chain.save(&block).unwrap();
     println!("end save");
 
-    for _i in 0..10 {
+    for _i in 0..100 {
         let txes: Vec<_> = (0..N)
             .map(|i| {
                 let from = &accounts[rand::random::<usize>() % N];
@@ -191,10 +200,13 @@ fn main() {
         println!("execution time:{:?}", new_now.duration_since(now));
     }
 
-    let expected = balances.iter().map(|(k, v)| {
-        println!("expected {}, got {}", *v, chain.balance(k).unwrap());
-        chain.balance(k).unwrap() == *v
-    }).all(|v| v);
+    let expected = balances
+        .iter()
+        .map(|(k, v)| {
+            println!("expected {}, got {}", *v, chain.balance(k).unwrap());
+            chain.balance(k).unwrap() == *v
+        })
+        .all(|v| v);
 
     println!("expected: {}", expected);
 }
